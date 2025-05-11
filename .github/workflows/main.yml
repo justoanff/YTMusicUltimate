@@ -53,7 +53,7 @@ jobs:
           fi
 
       - name: Install Dependencies
-        run: brew install make ldid
+        run: brew install make ldid unzip
 
       - name: Set PATH environment variable
         run: echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
@@ -95,6 +95,42 @@ jobs:
         id: download_youtube_music
         run: wget "${{ inputs.ipa_url }}" --no-verbose -O ${{ github.workspace }}/main/ytm.ipa
 
+      - name: Verify IPA structure
+        run: |
+          mkdir -p ipa_temp
+          cp ${{ github.workspace }}/main/ytm.ipa ipa_temp/
+          cd ipa_temp
+          
+          # Check if file is a valid zip
+          if ! unzip -t ytm.ipa > /dev/null; then
+            echo "::error::The downloaded IPA is not a valid zip file."
+            exit 1
+          fi
+          
+          # Check for Payload directory
+          if ! unzip -l ytm.ipa | grep -q "Payload/"; then
+            echo "::error::The IPA file does not contain a Payload directory."
+            exit 1
+          fi
+          
+          # Extract and check app structure
+          unzip -q ytm.ipa
+          if [ ! -d "Payload" ]; then
+            echo "::error::Payload directory not found after extraction."
+            exit 1
+          fi
+          
+          # Count .app directories
+          app_count=$(find Payload -name "*.app" -type d | wc -l)
+          if [ "$app_count" -eq 0 ]; then
+            echo "::error::No .app directory found inside Payload."
+            exit 1
+          fi
+          
+          echo "IPA structure verified successfully."
+          cd ..
+          rm -rf ipa_temp
+
       - name: Build Tweak for Sideloading
         id: build_package
         run: |
@@ -119,4 +155,4 @@ jobs:
 
       - name: Output Release URL
         run: |
-          echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases"
+          echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases" 
