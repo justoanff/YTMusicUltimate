@@ -2,7 +2,7 @@ name: Build and Release YTMusicUltimate
 
 on:
   workflow_dispatch:
-    inputs: 
+    inputs:
       ipa_url:
         description: "URL to the decrypted IPA file"
         default: ""
@@ -100,34 +100,80 @@ jobs:
           mkdir -p ipa_temp
           cp ${{ github.workspace }}/main/ytm.ipa ipa_temp/
           cd ipa_temp
-          
-          # Check if file is a valid zip
-          if ! unzip -t ytm.ipa > /dev/null; then
+
+          # Check file type and size
+          file ytm.ipa
+          du -h ytm.ipa
+
+          # Show file content overview
+          echo "File content overview:"
+          unzip -l ytm.ipa | head -20
+
+          # Try to inspect the zip structure
+          if ! unzip -t ytm.ipa > unzip_test_result.txt 2>&1; then
             echo "::error::The downloaded IPA is not a valid zip file."
+            cat unzip_test_result.txt
             exit 1
           fi
-          
-          # Check for Payload directory
-          if ! unzip -l ytm.ipa | grep -q "Payload/"; then
-            echo "::error::The IPA file does not contain a Payload directory."
+
+          # Check for common IPA structures (standard or non-standard)
+          if unzip -l ytm.ipa | grep -q "Payload/"; then
+            echo "Standard IPA structure detected with Payload directory."
+          elif unzip -l ytm.ipa | grep -q "\.app/"; then
+            echo "Non-standard IPA structure detected with .app directory but no Payload directory. Attempting to fix..."
+            
+            # Create Payload directory and try to move .app into it
+            mkdir -p Payload_temp
+            unzip -q ytm.ipa -d temp_extract
+            
+            # Find any .app directories and move them to Payload
+            find temp_extract -name "*.app" -type d -exec mv {} Payload_temp/ \;
+            
+            if [ -n "$(ls -A Payload_temp)" ]; then
+              echo "Successfully restructured IPA file."
+              rm ytm.ipa
+              cd temp_extract
+              zip -r ../fixed_ytm.ipa *
+              cd ..
+              mv fixed_ytm.ipa ytm.ipa
+            else
+              echo "::error::Could not find any .app directories to restructure."
+              exit 1
+            fi
+          else
+            echo "::error::The IPA file does not contain a Payload directory or any .app directories."
+            echo "File contents (top-level):"
+            unzip -l ytm.ipa | head -20
             exit 1
           fi
-          
+
           # Extract and check app structure
+          rm -rf Payload temp_extract Payload_temp 2>/dev/null || true
           unzip -q ytm.ipa
+
           if [ ! -d "Payload" ]; then
             echo "::error::Payload directory not found after extraction."
+            echo "Extracted contents:"
+            ls -la
             exit 1
           fi
-          
+
           # Count .app directories
           app_count=$(find Payload -name "*.app" -type d | wc -l)
           if [ "$app_count" -eq 0 ]; then
             echo "::error::No .app directory found inside Payload."
+            echo "Payload contents:"
+            ls -la Payload
             exit 1
           fi
-          
+
           echo "IPA structure verified successfully."
+          echo "Found $app_count .app directories in Payload:"
+          find Payload -name "*.app" -type d
+
+          # Copy the verified IPA back to workspace
+          cp ytm.ipa ${{ github.workspace }}/main/
+
           cd ..
           rm -rf ipa_temp
 
@@ -144,7 +190,53 @@ jobs:
           cd ${{ github.workspace }}/main/packages
           tweakName=$(ls)
           cd ${{ github.workspace }}/main
-          cyan -i ytm.ipa -o packages/YTMusicUltimate.ipa -uwsf packages/$tweakName -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} 
+
+          # Try with debug output for cyan
+          echo "Running cyan with verbose output..."
+          cyan -i ytm.ipa -o packages/YTMusicUltimate.ipa -uwsf packages/$tweakName -n "${{ inputs.display_name }}" -b ${{ inputs.bundle_id }} -v || {
+            echo "::warning::Cyan failed with the standard approach, attempting alternative method..."
+            
+            # Alternative approach: Extract IPA manually, inject tweak, then repackage
+            mkdir -p temp_extract
+            unzip -q ytm.ipa -d temp_extract
+            
+            echo "IPA extracted structure:"
+            ls -la temp_extract
+            
+            if [ -d "temp_extract/Payload" ]; then
+              app_path=$(find temp_extract/Payload -name "*.app" -type d | head -1)
+              
+              if [ -n "$app_path" ]; then
+                echo "Found app at: $app_path"
+                
+                # Unpack tweak
+                mkdir -p tweak_extract
+                cd packages
+                unzip -q $tweakName -d ../tweak_extract
+                cd ..
+                
+                # Copy tweak contents to app
+                cp -r tweak_extract/* "$app_path/"
+                
+                # Repackage
+                cd temp_extract
+                zip -r ../packages/YTMusicUltimate.ipa *
+                cd ..
+                
+                echo "Manual injection completed."
+                ls -la packages/YTMusicUltimate.ipa
+              else
+                echo "::error::Could not find .app directory in extracted IPA."
+                exit 1
+              fi
+            else
+              echo "::error::Could not find Payload directory in extracted IPA."
+              exit 1
+            fi
+            
+            # Clean up
+            rm -rf temp_extract tweak_extract
+          }
 
       - name: Create Release
         uses: softprops/action-gh-release@v2.0.6
@@ -155,4 +247,4 @@ jobs:
 
       - name: Output Release URL
         run: |
-          echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases" 
+          echo "::notice::Release available at: https://github.com/${{ github.repository }}/releases"
